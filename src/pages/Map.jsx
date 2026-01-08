@@ -30,23 +30,23 @@ const MapRecentre = ({ targetPosition }) => {
   return null;
 };
 
-// Build nearby dummy places once we know the true location
-const buildNearbyPlaces = (originLat, originLng) => {
-  const templates = [
-    { id: 1, name: "Sunrise Café", description: "Cozy breakfast spot with gentle playlists." },
-    { id: 2, name: "Riverwalk Park", description: "Wide open green space for relaxed strolls." },
-    { id: 3, name: "Glow Yoga Studio", description: "Small group sessions for an easy reset." },
-  ];
-
-  return templates.map((place, index) => {
-    const latitudeOffset = (index + 1) * 0.0008; // Small offsets keep markers close to the user
-    const longitudeOffset = (index % 2 === 0 ? 1 : -1) * 0.0012; // Alternate east/west for variety
-
-    return {
-      ...place,
-      position: [originLat + latitudeOffset, originLng + longitudeOffset],
-    };
-  });
+const moodPlaceMapping = {
+  Sad: {
+    query: "cozy cafe",
+    reason: "Warm drinks and soft lighting bring gentle comfort.",
+  },
+  Happy: {
+    query: "live music venue",
+    reason: "Lively music keeps the celebration energy up.",
+  },
+  Stressed: {
+    query: "quiet park",
+    reason: "Calm green paths help slow the pace and breathe.",
+  },
+  Romantic: {
+    query: "romantic restaurant",
+    reason: "Intimate dining setups support meaningful moments.",
+  },
 };
 
 const Map = () => {
@@ -56,7 +56,10 @@ const Map = () => {
 
   const [userPosition, setUserPosition] = useState(null); // Real coordinates once permission succeeds
   const [geoError, setGeoError] = useState(null); // Store any geolocation error message
-  const [nearbyPlaces, setNearbyPlaces] = useState([]); // Dummy places built from real coordinates
+  const [recommendedPlaces, setRecommendedPlaces] = useState([]); // Places from Nominatim
+  const [isLoadingPlaces, setIsLoadingPlaces] = useState(false);
+  const [placesError, setPlacesError] = useState(null);
+  const [locationNotice, setLocationNotice] = useState(null); // Optional UX note about accuracy
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -70,7 +73,12 @@ const Map = () => {
         console.log("Fetched user position:", latitude, longitude); // Quick check in DevTools
         console.log("Accuracy (meters):", position.coords.accuracy);
         setUserPosition({ lat: latitude, lng: longitude });
-        setNearbyPlaces(buildNearbyPlaces(latitude, longitude));
+        if (position.coords.accuracy > 10000) {
+          setLocationNotice("Location is approximate on desktop. For best accuracy, use mobile GPS.");
+        } else {
+          setLocationNotice(null);
+        }
+        setRecommendedPlaces([]);
       },
       () => {
         setGeoError("We could not access your location. Please enable location services and refresh.");
@@ -81,6 +89,84 @@ const Map = () => {
       }
     );
   }, []);
+
+  useEffect(() => {
+    if (!userPosition || !selectedMood) {
+      return;
+    }
+
+    const moodConfig = moodPlaceMapping[selectedMood] ?? null;
+    if (!moodConfig) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const fetchPlaces = async () => {
+      setIsLoadingPlaces(true);
+      setPlacesError(null);
+      setRecommendedPlaces([]);
+
+      const { lat, lng } = userPosition;
+      const rangeOffset = 0.02; // ~2km bounding box
+      const viewbox = [
+        (lng - rangeOffset).toFixed(6),
+        (lat - rangeOffset).toFixed(6),
+        (lng + rangeOffset).toFixed(6),
+        (lat + rangeOffset).toFixed(6),
+      ].join(",");
+
+      const url = new URL("https://nominatim.openstreetmap.org/search");
+      url.searchParams.set("format", "jsonv2");
+      url.searchParams.set("q", moodConfig.query);
+      url.searchParams.set("limit", "12");
+      url.searchParams.set("lat", lat.toString());
+      url.searchParams.set("lon", lng.toString());
+      url.searchParams.set("viewbox", viewbox);
+      url.searchParams.set("bounded", "1");
+      url.searchParams.set("addressdetails", "0");
+
+      try {
+        const response = await fetch(url.toString(), {
+          signal: controller.signal,
+          headers: {
+            Accept: "application/json",
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error("Unable to fetch nearby places right now.");
+        }
+
+        const data = await response.json();
+        const normalized = data.map((item, index) => ({
+          id: item.place_id?.toString() ?? `${item.lat}-${item.lon}-${index}`,
+          name: item.display_name ? item.display_name.split(",")[0] : moodConfig.query,
+          position: [parseFloat(item.lat), parseFloat(item.lon)],
+          reason: moodConfig.reason,
+        }));
+
+        if (normalized.length === 0) {
+          setPlacesError("No nearby spots matched this mood. Try another mood or zoom out.");
+        }
+
+        setRecommendedPlaces(normalized);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        console.error("Nominatim fetch error", error);
+        setPlacesError("We could not load mood suggestions. Please try again in a moment.");
+      } finally {
+        setIsLoadingPlaces(false);
+      }
+    };
+
+    fetchPlaces();
+
+    return () => {
+      controller.abort();
+    };
+  }, [userPosition, selectedMood]);
 
   return (
     <main className="relative mx-auto flex min-h-screen max-w-5xl flex-col gap-6 px-6 py-16">
@@ -125,16 +211,26 @@ const Map = () => {
             <Marker position={[userPosition.lat, userPosition.lng]} icon={userIcon}>
               <Popup>You are here.</Popup>
             </Marker>
-            {nearbyPlaces.map((place) => (
+            {recommendedPlaces.map((place) => (
               <Marker key={place.id} position={place.position} icon={placeIcon}>
                 <Popup>
                   <strong>{place.name}</strong>
                   <br />
-                  {place.description}
+                  {place.reason}
                 </Popup>
               </Marker>
             ))}
           </MapContainer>
+        ) : null}
+
+        {isLoadingPlaces ? (
+          <p className="text-xs text-slate-500">Loading mood-matched places nearby...</p>
+        ) : null}
+        {placesError ? (
+          <p className="text-xs text-rose-500">{placesError}</p>
+        ) : null}
+        {locationNotice ? (
+          <p className="text-xs text-slate-500">{locationNotice}</p>
         ) : null}
 
         <button
