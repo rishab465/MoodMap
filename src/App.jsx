@@ -4,7 +4,7 @@ import Map from "./pages/Map.jsx";
 
 const App = () => {
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100">
+    <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-sky-50 to-white text-slate-800">
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/map" element={<Map />} />

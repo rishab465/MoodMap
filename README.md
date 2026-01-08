@@ -1,16 +1,43 @@
-# React + Vite
+# Mood-Based Place Finder (Phase 1)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Front-end scaffold for a mood-driven location discovery app. This phase focuses on delivering a polished React UI with routing and Tailwind styling so future data integrations have a strong visual foundation.
 
-Currently, two official plugins are available:
+## Features
+- React Router with Home (`/`) and Map (`/map`) routes.
+- Mood selection cards (Sad, Happy, Stressed, Romantic) with visual feedback.
+- Disabled state for the action button until a mood is selected.
+- Map page confirms the selected mood and presents a styled placeholder for future map work.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## Tech Stack
+- Vite + React 19
+- React Router DOM 7
+- Tailwind CSS 3
+- ESLint (recommended rules)
 
-## React Compiler
+## Project Structure
+```
+src/
+	components/
+		MoodCard.jsx
+	pages/
+		Home.jsx
+		Map.jsx
+	App.jsx
+	main.jsx
+	index.css
+```
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Getting Started
+```bash
+npm install
+npm run dev    # start local dev server
+npm run build  # production build check
+```
 
-## Expanding the ESLint configuration
+## Next Steps
+- Integrate a real map provider (Google Maps, Mapbox, etc.).
+- Wire moods to curated place recommendations.
+- Add backend/API layer for location data and filtering.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Resume Summary
+“Built the React + Tailwind UI scaffold for a mood-driven place finder, delivering interactive mood selection, router-based navigation, and a polished roadmap for future map and data integrations.”

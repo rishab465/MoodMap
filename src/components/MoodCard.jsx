@@ -1,23 +1,36 @@
-const MoodCard = ({ mood, caption, isSelected, onSelect }) => {
+const MoodCard = ({ mood, caption, icon, iconBg, textColor, isSelected, onSelect }) => {
+  const accentHeading = textColor ?? "text-slate-900";
+
   return (
     <button
       type="button"
       onClick={() => onSelect(mood)}
-      className={`group w-full rounded-2xl border-2 px-6 py-7 text-left transition-all duration-200 ${
+      className={`group relative flex h-full w-full flex-col gap-4 rounded-3xl border px-7 py-8 text-left shadow-sm transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 ${
         isSelected
-          ? "border-emerald-400/80 bg-emerald-500/15 shadow-xl shadow-emerald-500/10"
-          : "border-slate-800 bg-slate-800/80 hover:-translate-y-1 hover:border-emerald-300/70 hover:bg-slate-800"
+          ? "border-emerald-300 bg-white shadow-lg ring-2 ring-emerald-300"
+          : "border-emerald-100 bg-white/80 hover:-translate-y-1 hover:border-emerald-200 hover:shadow-lg"
       }`}
     >
+      <span className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl text-2xl ${iconBg}`}>
+        {icon}
+      </span>
+      <div className="flex items-center gap-3">
+        <h3 className={`text-2xl font-semibold ${accentHeading}`}>{mood}</h3>
+        {isSelected ? (
+          <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
+            Selected
+          </span>
+        ) : null}
+      </div>
+      <p className="text-sm leading-6 text-slate-600">{caption}</p>
       <span
-        className={`inline-flex h-12 w-12 items-center justify-center rounded-xl text-lg font-semibold transition-colors ${
-          isSelected ? "bg-emerald-400 text-slate-900" : "bg-slate-700 text-emerald-200 group-hover:bg-emerald-300 group-hover:text-slate-900"
+        className={`mt-auto inline-flex items-center gap-2 text-xs font-semibold transition ${
+          isSelected ? "text-emerald-600" : "text-emerald-500/70 group-hover:text-emerald-600"
         }`}
       >
-        {mood.charAt(0)}
+        Explore matches
+        <span aria-hidden>↗</span>
       </span>
-      <h3 className="mt-4 text-2xl font-semibold tracking-tight text-emerald-200">{mood}</h3>
-      <p className="mt-2 text-sm leading-6 text-slate-300/90">{caption}</p>
     </button>
   );
 };
