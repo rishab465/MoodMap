@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
+import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { useTheme } from "../theme/ThemeContext.jsx";
 
-// Shared Leaflet marker configuration keeps icons consistent
-const baseMarkerOptions = {
+const markerOptions = {
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
@@ -15,690 +15,444 @@ const baseMarkerOptions = {
   shadowSize: [41, 41],
 };
 
-const userIcon = new L.Icon(baseMarkerOptions);
-const placeIcon = new L.Icon(baseMarkerOptions);
+const userIcon = new L.Icon(markerOptions);
+const placeIcon = new L.Icon(markerOptions);
 
-// Keeps the map viewport synced with the latest user position
-const MapRecentre = ({ targetPosition }) => {
+const NOMINATIM_BASE = "https://nominatim.openstreetmap.org/search";
+const NOMINATIM_HEADERS = {
+  Accept: "application/json",
+  // Identifying the app keeps requests within Nominatim policy.
+  "User-Agent": "MoodMap Frontend (https://github.com/rishab465/MoodMap)",
+};
+
+const MAX_RESULTS = 20; // Show more options to the user.
+const PRIMARY_RADIUS_KM = 5; // Cast a wider net for the first pass.
+const CITY_RADIUS_KM = PRIMARY_RADIUS_KM * 4; // Expand city-level search even further.
+const MAX_DISTANCE_KM = 20; // Allow slightly farther results for more options.
+
+const MOOD_KEYWORDS = {
+  Happy: {
+    keywords: ["live music", "rooftop bar", "festival", "dessert cafe"],
+    reason: "Upbeat venues keep the celebration going.",
+  },
+  Sad: {
+    keywords: ["cozy cafe", "bookstore", "tea lounge", "soothing spa"],
+    reason: "Warm lighting and calm playlists help reset the mood.",
+  },
+  Angry: {
+    keywords: ["boxing studio", "arcade bar", "escape room", "indoor climbing"],
+    reason: "High-energy experiences channel intensity in a grounded way.",
+  },
+  Calm: {
+    keywords: ["botanical garden", "meditation studio", "tea house", "nature walk"],
+    reason: "Soft nature-backed experiences keep things peaceful.",
+  },
+};
+
+const BASE_KEYWORDS = ["restaurant", "park", "cafe", "museum", "shopping"];
+
+const MapRecentre = ({ target }) => {
   const map = useMap();
 
   useEffect(() => {
-    if (!targetPosition) return;
-    map.setView([targetPosition.lat, targetPosition.lng]);
-  }, [map, targetPosition]);
+    if (!target) return;
+    map.setView([target.lat, target.lng], 14);
+  }, [map, target]);
 
   return null;
 };
 
-const NOMINATIM_HEADERS = {
-  Accept: "application/json",
-};
-const NOMINATIM_EMAIL = "moodmap@example.com";
-
-const moodPlaceMapping = {
-  Sad: {
-    queries: ["cafe", "coffee shop"],
-    reason: "Warm drinks and soft lighting bring gentle comfort.",
-  },
-  Happy: {
-    queries: ["music", "bar", "live music"],
-    reason: "Lively music keeps the celebration energy up.",
-  },
-  Stressed: {
-    queries: ["park", "garden"],
-    reason: "Calm green paths help slow the pace and breathe.",
-  },
-  Romantic: {
-    queries: ["romantic restaurant", "restaurant"],
-    reason: "Intimate dining setups support meaningful moments.",
-  },
+const safeName = (name, fallback) => {
+  if (!name) return fallback;
+  const [first] = name.split(",");
+  return first?.trim() || fallback;
 };
 
-const RADIUS_OPTIONS_KM = [3, 6, 10, 15];
-const DEFAULT_RADIUS_KM = 6;
-const EARTH_RADIUS_KM = 6371;
-const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
-  const toRadians = (value) => (value * Math.PI) / 180;
-  if ([lat1, lon1, lat2, lon2].some((value) => !Number.isFinite(value))) {
-    return Infinity;
+const buildSearchUrl = ({ term, centre, radiusKm, bounded }) => {
+  const url = new URL(NOMINATIM_BASE);
+  url.searchParams.set("q", term);
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("limit", "20");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("extratags", "1");
+
+  if (centre && bounded) {
+    const padding = radiusKm / 111; // Rough degrees to km conversion around the equator.
+    const north = centre.lat + padding;
+    const south = centre.lat - padding;
+    const east = centre.lng + padding * Math.cos((centre.lat * Math.PI) / 180);
+    const west = centre.lng - padding * Math.cos((centre.lat * Math.PI) / 180);
+    url.searchParams.set("bounded", "1");
+    url.searchParams.set("viewbox", `${west},${north},${east},${south}`);
+  } else {
+    url.searchParams.set("bounded", "0");
   }
+
+  return url.toString();
+};
+
+const fetchAndNormalize = async ({ url, reason, fallbackTerm }) => {
+  try {
+    const response = await fetch(url, { headers: NOMINATIM_HEADERS });
+    if (!response.ok) return [];
+    const data = await response.json();
+    if (!Array.isArray(data)) return [];
+
+    return data
+      .map((item, index) => {
+        const lat = Number(item.lat);
+        const lng = Number(item.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+        const fallbackName = `${fallbackTerm} ${index + 1}`;
+        return {
+          id: item.place_id?.toString() || `${lat},${lng}`,
+          name: safeName(item.display_name, fallbackName),
+          position: [lat, lng],
+          description: item.display_name,
+          isFallback: false,
+          tags: item.extratags || {},
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    console.warn("Nominatim error", error);
+    return [];
+  }
+};
+
+const createMockPlaces = ({ centre, reason, count }) => {
+  const offsets = [
+    { label: "North Hangout", lat: 0.01, lng: 0 },
+    { label: "East Hangout", lat: 0, lng: 0.01 },
+    { label: "South Hangout", lat: -0.01, lng: 0 },
+    { label: "West Hangout", lat: 0, lng: -0.01 },
+    { label: "Lakeside Retreat", lat: 0.006, lng: -0.006 },
+    { label: "Sunset Deck", lat: -0.006, lng: 0.006 },
+    { label: "Garden Nook", lat: 0.008, lng: 0.004 },
+    { label: "River Bend", lat: -0.004, lng: -0.008 },
+    { label: "Central Spot", lat: 0.004, lng: 0.004 },
+    { label: "Skyline Lookout", lat: -0.008, lng: 0.002 },
+  ];
+
+  return offsets.slice(0, count).map((offset, index) => ({
+    id: `mock-${index}`,
+    name: offset.label,
+    position: [centre.lat + offset.lat, centre.lng + offset.lng],
+    description: reason,
+    isFallback: true,
+  }));
+};
+
+const dedupeByLocation = (places) => {
+  const seen = new Set();
+  return places.filter((place) => {
+    const key = `${place.position[0].toFixed(4)}-${place.position[1].toFixed(4)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+// Haversine formula: calculates straight-line distance between two lat/lng points in kilometers.
+const distanceKm = (lat1, lng1, lat2, lng2) => {
+  const toRadians = (deg) => (deg * Math.PI) / 180;
+  const R = 6371; // Earth radius in km
   const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
+  const dLng = toRadians(lng2 - lng1);
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) *
-      Math.cos(toRadians(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(EARTH_RADIUS_KM * c * 10) / 10;
+  return R * c;
+};
+
+// Removes any places outside the max allowed distance from the user's location.
+const filterByDistance = (places, userLat, userLng, maxKm) => {
+  return places.filter((place) => {
+    const [placeLat, placeLng] = place.position;
+    const dist = distanceKm(userLat, userLng, placeLat, placeLng);
+    return dist <= maxKm;
+  });
 };
 
 const Map = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const { mood: activeMood, setMood, theme } = useTheme();
+  const routeMood = location.state?.mood;
 
-  const [selectedMood, setSelectedMood] = useState(() => {
-    const moodFromNavigation = location.state?.mood;
-    if (moodFromNavigation && moodPlaceMapping[moodFromNavigation]) {
-      return moodFromNavigation;
+  const [userPosition, setUserPosition] = useState(() => {
+    if (typeof window === "undefined") return null;
+    const cached = window.sessionStorage.getItem("moodmap:lastLocation");
+    if (!cached) return null;
+    try {
+      return JSON.parse(cached);
+    } catch (error) {
+      console.warn("Failed to read cached location", error);
+      return null;
     }
-
-    if (typeof window !== "undefined") {
-      const storedMood = window.sessionStorage.getItem("moodmap:lastMood");
-      if (storedMood && moodPlaceMapping[storedMood]) {
-        return storedMood;
-      }
-    }
-
-    return null;
   });
 
-  const [userPosition, setUserPosition] = useState(null); // Real coordinates once permission succeeds
-  const [geoError, setGeoError] = useState(null); // Store any geolocation error message
-  const [recommendedPlaces, setRecommendedPlaces] = useState([]); // Places from Nominatim
+  const [geoStatus, setGeoStatus] = useState("Requesting location…");
+  const [manualInput, setManualInput] = useState("");
+  const [manualError, setManualError] = useState(null);
+  const [recommendedPlaces, setRecommendedPlaces] = useState([]);
   const [isLoadingPlaces, setIsLoadingPlaces] = useState(false);
-  const [placesError, setPlacesError] = useState(null);
-  const [locationNotice, setLocationNotice] = useState(null); // Optional UX note about accuracy
-  const [manualLocationInput, setManualLocationInput] = useState("");
-  const [manualLocationError, setManualLocationError] = useState(null);
-  const [isManualLookup, setIsManualLookup] = useState(false);
-  const [mapFocus, setMapFocus] = useState(null);
-  const [activePlaceId, setActivePlaceId] = useState(null);
-  const [selectedRadiusKm, setSelectedRadiusKm] = useState(DEFAULT_RADIUS_KM);
-  const [radiusLoaded, setRadiusLoaded] = useState(false);
-
-  const supportsGeolocation = typeof navigator !== "undefined" && !!navigator.geolocation;
 
   useEffect(() => {
-    if (typeof window === "undefined" || radiusLoaded) {
-      return;
+    if (routeMood && routeMood !== activeMood) {
+      setMood(routeMood);
     }
-    const stored = window.sessionStorage.getItem("moodmap:radiusKm");
-    if (stored) {
-      const parsed = Number(stored);
-      if (!Number.isNaN(parsed) && parsed > 0) {
-        setSelectedRadiusKm(parsed);
-      }
-    }
-    setRadiusLoaded(true);
-  }, [radiusLoaded]);
+  }, [routeMood, activeMood, setMood]);
 
   useEffect(() => {
-    const moodFromNavigation = location.state?.mood;
-    if (moodFromNavigation && moodPlaceMapping[moodFromNavigation] && moodFromNavigation !== selectedMood) {
-      setSelectedMood(moodFromNavigation);
-    }
-  }, [location.state, selectedMood]);
-
-  useEffect(() => {
-    if (!selectedMood || typeof window === "undefined") {
-      return;
-    }
-    window.sessionStorage.setItem("moodmap:lastMood", selectedMood);
-  }, [selectedMood]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !radiusLoaded) {
-      return;
-    }
-    if (radiusLoaded) {
-      window.sessionStorage.setItem("moodmap:radiusKm", String(selectedRadiusKm));
-    }
-  }, [selectedRadiusKm, radiusLoaded]);
-
-  const requestUserLocation = useCallback(() => {
-    if (!supportsGeolocation) {
-      setGeoError("Geolocation is not supported in this browser.");
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setGeoStatus("Geolocation unavailable. Enter a city below.");
       return;
     }
 
-    setGeoError(null);
-    setLocationNotice(null);
-    setManualLocationError(null);
+    setGeoStatus("Requesting location…");
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude, accuracy } = position.coords;
-        console.log("Fetched user position:", latitude, longitude); // Quick check in DevTools
-        console.log("Accuracy (meters):", accuracy);
-        setUserPosition({ lat: latitude, lng: longitude });
-        setMapFocus({ lat: latitude, lng: longitude });
-        setRecommendedPlaces([]);
-        setPlacesError(null);
-        setManualLocationInput("");
-        setActivePlaceId(null);
-        if (accuracy > 10000) {
-          setLocationNotice("Location is approximate on desktop. For best accuracy, use mobile GPS.");
-        } else {
-          setLocationNotice(null);
+        const coords = { lat: latitude, lng: longitude, accuracy };
+        setUserPosition(coords);
+        setGeoStatus("Location locked.");
+        if (typeof window !== "undefined") {
+          window.sessionStorage.setItem("moodmap:lastLocation", JSON.stringify(coords));
         }
       },
-      (error) => {
-        let message = "We could not access your location. Allow permissions or set a place manually.";
-        if (error?.code === error?.PERMISSION_DENIED) {
-          message = "Location access is blocked. Enable permissions for this site and choose Retry or set a place manually.";
-        } else if (error?.code === error?.POSITION_UNAVAILABLE) {
-          message = "We could not determine your location. Check your connection or set a place manually.";
-        } else if (error?.code === error?.TIMEOUT) {
-          message = "The location request timed out. Try again, or enter a location manually below.";
-        }
-        console.warn("Geolocation error", error);
-        setGeoError(message);
-        setUserPosition(null);
-        setMapFocus(null);
-        setRecommendedPlaces([]);
-        setLocationNotice(null);
+      () => {
+        setGeoStatus("We could not read GPS. Enter a location manually.");
       },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-      }
+      { enableHighAccuracy: true, timeout: 10000 }
     );
-  }, [supportsGeolocation]);
+  }, []);
 
-  useEffect(() => {
-    requestUserLocation();
-  }, [requestUserLocation]);
+  const moodConfig = useMemo(() => {
+    return {
+      keywords: [...(MOOD_KEYWORDS[activeMood]?.keywords || []), ...BASE_KEYWORDS],
+      reason: MOOD_KEYWORDS[activeMood]?.reason || "Local suggestion",
+    };
+  }, [activeMood]);
 
-  const mapCenter = mapFocus ?? userPosition;
+  const approximateNote = useMemo(() => {
+    if (!userPosition?.accuracy) return "Desktop browsers may use Wi‑Fi or IP data, so spots are approximate.";
+    if (userPosition.accuracy > 500) return "Location is approximate (browser reported low accuracy).";
+    return null;
+  }, [userPosition]);
 
-  const handleManualLocationSubmit = async (event) => {
+  const handleManualLookup = async (event) => {
     event.preventDefault();
-    const searchTerm = manualLocationInput.trim();
-
+    const searchTerm = manualInput.trim();
     if (!searchTerm) {
-      setManualLocationError("Please enter a city, address, or landmark.");
+      setManualError("Type a city, address, or landmark.");
       return;
     }
 
-    setIsManualLookup(true);
-    setManualLocationError(null);
-    setPlacesError(null);
-
     try {
-      const url = new URL("https://nominatim.openstreetmap.org/search");
+      setManualError(null);
+      setGeoStatus("Finding that spot…");
+
+      const url = new URL(NOMINATIM_BASE);
       url.searchParams.set("format", "jsonv2");
       url.searchParams.set("q", searchTerm);
       url.searchParams.set("limit", "1");
-      url.searchParams.set("addressdetails", "0");
-      url.searchParams.set("email", NOMINATIM_EMAIL);
 
-      const response = await fetch(url.toString(), {
-        headers: NOMINATIM_HEADERS,
-      });
-
-      if (!response.ok) {
-        throw new Error("Lookup failed");
-      }
+      const response = await fetch(url.toString(), { headers: NOMINATIM_HEADERS });
+      if (!response.ok) throw new Error("Manual lookup failed");
 
       const data = await response.json();
-
       if (!Array.isArray(data) || data.length === 0) {
-        setManualLocationError("We could not find that location. Try a nearby city or landmark.");
+        setManualError("We could not find that place. Try a nearby city.");
         return;
       }
 
-      const primary = data[0];
-      const latitude = parseFloat(primary.lat);
-      const longitude = parseFloat(primary.lon);
-
-      if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
-        setManualLocationError("We could not read that location. Please try again.");
+      const hit = data[0];
+      const lat = Number(hit.lat);
+      const lng = Number(hit.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        setManualError("That result looked odd. Please try again.");
         return;
       }
 
-      const label = primary.display_name ? primary.display_name.split(",")[0] : searchTerm;
-
-      setUserPosition({ lat: latitude, lng: longitude });
-      setMapFocus({ lat: latitude, lng: longitude });
-      setRecommendedPlaces([]);
-      setLocationNotice(`Using manually set location near ${label}. Adjust the map to refine.`);
-      setGeoError(null);
-      setManualLocationInput("");
-      setActivePlaceId(null);
+      const coords = { lat, lng, accuracy: null };
+      setUserPosition(coords);
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem("moodmap:lastLocation", JSON.stringify(coords));
+      }
+      setGeoStatus("Manual location applied.");
+      setManualInput("");
     } catch (error) {
-      console.error("Manual location lookup error", error);
-      setManualLocationError("We could not look up that spot. Please try again in a moment.");
-    } finally {
-      setIsManualLookup(false);
+      console.error("Manual lookup error", error);
+      setManualError("We could not look up that place. Please try again.");
     }
   };
 
   useEffect(() => {
-    if (!userPosition || !selectedMood) {
-      return;
-    }
+    if (!userPosition || !moodConfig) return;
 
-    const moodConfig = moodPlaceMapping[selectedMood] ?? null;
-    if (!moodConfig) {
-      return;
-    }
+    let active = true;
+    setIsLoadingPlaces(true);
 
-    const controller = new AbortController();
+    const loadPlaces = async () => {
+      const keywords = Array.from(new Set(moodConfig.keywords));
+      const collected = [];
 
-    const buildUrl = ({ query, lat, lng, rangeOffset, bounded }) => {
-      const url = new URL("https://nominatim.openstreetmap.org/search");
-      url.searchParams.set("format", "jsonv2");
-      url.searchParams.set("q", query);
-      url.searchParams.set("limit", "12");
-      url.searchParams.set("lat", lat.toString());
-      url.searchParams.set("lon", lng.toString());
-      url.searchParams.set("bounded", bounded ? "1" : "0");
-      url.searchParams.set("addressdetails", "0");
-      url.searchParams.set("email", NOMINATIM_EMAIL);
+      for (const term of keywords) {
+        if (!active) return;
 
-      if (bounded) {
-        // OpenStreetMap expects viewbox order: left, top, right, bottom (lon/lat)
-        const viewbox = [
-          (lng - rangeOffset).toFixed(6),
-          (lat + rangeOffset).toFixed(6),
-          (lng + rangeOffset).toFixed(6),
-          (lat - rangeOffset).toFixed(6),
-        ].join(",");
-        url.searchParams.set("viewbox", viewbox);
+        const nearbyUrl = buildSearchUrl({ term, centre: userPosition, radiusKm: PRIMARY_RADIUS_KM, bounded: true });
+        const nearby = await fetchAndNormalize({ url: nearbyUrl, reason: moodConfig.reason, fallbackTerm: term });
+        collected.push(...nearby);
+
+        if (collected.length >= MAX_RESULTS) break;
+
+        const cityUrl = buildSearchUrl({ term, centre: userPosition, radiusKm: CITY_RADIUS_KM, bounded: false });
+        const cityWide = await fetchAndNormalize({ url: cityUrl, reason: moodConfig.reason, fallbackTerm: term });
+        collected.push(...cityWide);
+
+        if (collected.length >= MAX_RESULTS) break;
       }
 
-      return url;
-    };
+      if (!active) return;
 
-    const fetchPlaces = async () => {
-      setIsLoadingPlaces(true);
-      setPlacesError(null);
-      setRecommendedPlaces([]);
+      let uniquePlaces = dedupeByLocation(collected).map((place) => ({
+        ...place,
+        reason: place.description || moodConfig.reason,
+      }));
 
-        if (!radiusLoaded) {
-          setIsLoadingPlaces(false);
-          return;
-        }
+      // CRITICAL: Filter out anything too far away (prevents worldwide results).
+      uniquePlaces = filterByDistance(uniquePlaces, userPosition.lat, userPosition.lng, MAX_DISTANCE_KM);
 
-        const { lat, lng } = userPosition;
-        const degreesPerKm = 1 / 111;
-        const rangeOffset = Math.max(selectedRadiusKm * degreesPerKm * 1.6, 0.02); // Slightly larger viewbox
-        const searchTerms = moodConfig.queries ?? [moodConfig.query].filter(Boolean);
-        const fallbackTerms = ["restaurant", "park"];
-
-        const normalizePlaces = (data, term, idPrefix) =>
-          data
-            .map((item, index) => {
-              const placeLat = parseFloat(item.lat);
-              const placeLon = parseFloat(item.lon);
-              const distanceKm = calculateDistanceKm(lat, lng, placeLat, placeLon);
-
-              return {
-                id: item.place_id?.toString() ?? `${placeLat}-${placeLon}-${idPrefix}-${index}`,
-                name: item.display_name ? item.display_name.split(",")[0] : term,
-                position: [placeLat, placeLon],
-                reason: moodConfig.reason,
-                distanceKm,
-              };
-            })
-            .filter(
-              (place) =>
-                Array.isArray(place.position) &&
-                place.position.length === 2 &&
-                Number.isFinite(place.position[0]) &&
-                Number.isFinite(place.position[1]) &&
-                Number.isFinite(place.distanceKm)
-            );
-
-        const fetchForTerm = async (term, idPrefix) => {
-          const boundedUrl = buildUrl({
-            query: term,
-            lat,
-            lng,
-            rangeOffset,
-            bounded: true,
-          });
-
-          let normalized = [];
-
-          try {
-            const boundedResponse = await fetch(boundedUrl.toString(), {
-              signal: controller.signal,
-              headers: NOMINATIM_HEADERS,
-            });
-
-            if (!boundedResponse.ok) {
-              throw new Error("Bounded request failed");
-            }
-
-            const primaryData = await boundedResponse.json();
-            console.log("Nominatim primary results", { term, count: primaryData.length });
-            normalized = normalizePlaces(primaryData, term, `${idPrefix}-primary`);
-          } catch (error) {
-            console.warn("Bounded request issue", term, error);
-          }
-
-          if (normalized.length === 0) {
-            const fallbackUrl = buildUrl({
-              query: term,
-              lat,
-              lng,
-              rangeOffset: rangeOffset * 1.5,
-              bounded: false,
-            });
-            try {
-              const fallbackResponse = await fetch(fallbackUrl.toString(), {
-                signal: controller.signal,
-                headers: NOMINATIM_HEADERS,
-              });
-
-              if (fallbackResponse.ok) {
-                const fallbackData = await fallbackResponse.json();
-                console.log("Nominatim fallback results", { term, count: fallbackData.length });
-                normalized = normalizePlaces(fallbackData, term, `${idPrefix}-fallback`);
-              }
-            } catch (fallbackError) {
-              console.warn("Fallback request issue", term, fallbackError);
-            }
-          }
-
-          return normalized;
-        };
-
-      try {
-        setMapFocus((current) => {
-          if (current && current.lat === lat && current.lng === lng) {
-            return current;
-          }
-          return { lat, lng };
-        });
-        setActivePlaceId(null);
-
-        const accumulator = [];
-
-        for (const term of searchTerms) {
-          const results = await fetchForTerm(term, `mood-${term}`);
-          if (results.length > 0) {
-            accumulator.push(...results);
-          }
-        }
-
-        if (accumulator.length === 0) {
-          for (const term of fallbackTerms) {
-            const results = await fetchForTerm(term, `fallback-${term}`);
-            if (results.length > 0) {
-              accumulator.push(...results);
-              break;
-            }
-          }
-        }
-
-        const uniqueByKey = new Map();
-        for (const place of accumulator) {
-          const key = place.id ?? `${place.position[0]}-${place.position[1]}`;
-          if (!uniqueByKey.has(key)) {
-            uniqueByKey.set(key, place);
-          }
-        }
-
-        const uniquePlaces = Array.from(uniqueByKey.values());
-
-        if (uniquePlaces.length === 0) {
-          setPlacesError("No nearby spots matched this mood. Try another mood or zoom out.");
-          setRecommendedPlaces([]);
-          setActivePlaceId(null);
-          setIsLoadingPlaces(false);
-          return;
-        }
-
-        const withinRadius = uniquePlaces.filter((place) => place.distanceKm <= selectedRadiusKm);
-
-        if (withinRadius.length === 0) {
-          setPlacesError(`No spots within ${selectedRadiusKm} km. Try increasing the search radius.`);
-          setRecommendedPlaces([]);
-          setActivePlaceId(null);
-          setIsLoadingPlaces(false);
-          return;
-        }
-
-        const trimmed = withinRadius
-          .sort((a, b) => a.distanceKm - b.distanceKm)
-          .slice(0, 6);
-
-        setRecommendedPlaces(trimmed);
-        setActivePlaceId((current) => (trimmed.some((place) => place.id === current) ? current : null));
-      } catch (error) {
-        if (controller.signal.aborted) {
-          return;
-        }
-        console.error("Nominatim fetch error", error);
-        setPlacesError("We could not load mood suggestions. Please try again in a moment.");
-      } finally {
+      // Show only real places—no fake fallbacks. Empty is honest.
+      if (active) {
+        setRecommendedPlaces(uniquePlaces.slice(0, MAX_RESULTS));
         setIsLoadingPlaces(false);
       }
     };
 
-    fetchPlaces();
+    loadPlaces();
 
     return () => {
-      controller.abort();
+      active = false;
     };
-  }, [userPosition, selectedMood, selectedRadiusKm, radiusLoaded]);
+  }, [moodConfig, userPosition]);
+
+  const moodReason = MOOD_KEYWORDS[activeMood]?.reason || "Local suggestion";
 
   return (
-    <main className="relative mx-auto flex min-h-screen max-w-5xl flex-col gap-6 px-6 py-16">
-      <div className="pointer-events-none absolute inset-x-0 top-[-6rem] -z-10 flex justify-center">
-        <div className="h-72 w-72 rounded-full bg-sky-200/40 blur-3xl"></div>
-      </div>
+    <main className="mx-auto flex min-h-screen max-w-5xl flex-col gap-6 px-6 py-16 lg:px-10">
 
-      <section className="rounded-3xl border border-emerald-100 bg-white/80 px-8 py-6 shadow-lg">
-        <p className="text-xs font-semibold uppercase tracking-[0.35em] text-emerald-500">Recommendation preview</p>
-        <h2 className="mt-3 text-2xl font-semibold text-slate-900">
-          Showing nearby places for mood: <span className="text-emerald-600">{selectedMood || "No mood selected"}</span>
+      <section className="glass-panel-strong rounded-3xl px-8 py-6 shadow-lg transition-colors duration-500">
+        <p className="accent-text text-xs font-semibold uppercase tracking-[0.35em]">Recommendation preview</p>
+        <h2 className="text-primary mt-3 text-2xl font-semibold">
+          Showing nearby places for mood: <span className="accent-text">{activeMood}</span>
         </h2>
-        {geoError ? (
-          <p className="mt-3 text-sm text-rose-500">{geoError}</p>
-        ) : (
-          <p className="mt-3 text-sm text-slate-600">
-            Allow location access to see the map centered around you along with a few practice pins.
-          </p>
-        )}
-        <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-600">
-          <label
-            htmlFor="search-radius"
-            className="font-semibold uppercase tracking-[0.2em] text-slate-500"
-          >
-            Search radius
+        <p className="text-subtle mt-1 text-xs">{theme.description}</p>
+        <p className="text-secondary mt-3 text-sm">{geoStatus}</p>
+        {approximateNote ? <p className="text-subtle mt-1 text-xs">{approximateNote}</p> : null}
+        <form onSubmit={handleManualLookup} className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <label htmlFor="manual-location" className="text-subtle text-xs font-semibold uppercase tracking-[0.2em]">
+            Manual location
           </label>
-          <select
-            id="search-radius"
-            value={selectedRadiusKm}
-            onChange={(event) => {
-              const next = Number(event.target.value);
-              setSelectedRadiusKm(next);
-              setMapFocus(null);
-            }}
-            className="rounded-full border border-emerald-200 bg-white/80 px-4 py-2 text-xs font-semibold text-emerald-600 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-          >
-            {[...new Set([...RADIUS_OPTIONS_KM, selectedRadiusKm])]
-              .sort((a, b) => a - b)
-              .map((option) => (
-                <option key={option} value={option}>
-                  {option} km
-                </option>
-              ))}
-          </select>
-          <span className="text-[0.7rem] text-slate-500">
-            Smaller distances keep things nearby; larger ones widen the search box.
-          </span>
-        </div>
-        {(geoError || !userPosition) ? (
-          <div className="mt-4 flex flex-col gap-3 text-sm text-slate-600">
-            {supportsGeolocation ? (
-              <button
-                type="button"
-                onClick={requestUserLocation}
-                className="w-fit rounded-full border border-emerald-200 px-4 py-2 text-xs font-semibold text-emerald-600 transition hover:bg-emerald-50"
-              >
-                Retry location access
-              </button>
-            ) : null}
-            <form
-              onSubmit={handleManualLocationSubmit}
-              className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3"
+          <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              id="manual-location"
+              value={manualInput}
+              onChange={(event) => {
+                setManualInput(event.target.value);
+                setManualError(null);
+              }}
+              placeholder="Try: Central Park, New York"
+              className="input-soft w-full rounded-full px-4 py-2 text-xs"
+            />
+            <button
+              type="submit"
+              className="btn-primary inline-flex items-center justify-center rounded-full px-4 py-2 text-xs font-semibold shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
             >
-              <label
-                htmlFor="manual-location"
-                className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 sm:w-48"
-              >
-                Manual location
-              </label>
-              <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                <input
-                  id="manual-location"
-                  type="text"
-                  placeholder="Try: Central Park, New York"
-                  value={manualLocationInput}
-                  onChange={(event) => {
-                    setManualLocationInput(event.target.value);
-                    if (manualLocationError) {
-                      setManualLocationError(null);
-                    }
-                  }}
-                  disabled={isManualLookup}
-                  className="w-full rounded-full border border-emerald-200 bg-white/70 px-4 py-2 text-xs text-slate-700 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-                />
-                <button
-                  type="submit"
-                  disabled={isManualLookup}
-                  className={`inline-flex items-center justify-center rounded-full px-4 py-2 text-xs font-semibold transition ${
-                    isManualLookup ? "cursor-wait bg-emerald-200 text-emerald-500" : "bg-emerald-500 text-white hover:bg-emerald-400"
-                  }`}
-                >
-                  {isManualLookup ? "Setting location..." : "Use location"}
-                </button>
-              </div>
-            </form>
-            {manualLocationError ? (
-              <p className="text-xs text-rose-500">{manualLocationError}</p>
-            ) : null}
+              Use location
+            </button>
           </div>
-        ) : null}
+        </form>
+        {manualError ? <p className="mt-2 text-xs text-rose-400">{manualError}</p> : null}
       </section>
 
-      <div className="flex flex-1 flex-col gap-4 rounded-3xl border border-emerald-100 bg-white/80 px-4 py-4 shadow-lg">
-        {!userPosition && !geoError ? (
-          <div className="flex h-[480px] w-full flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-emerald-200 bg-emerald-50 text-center text-slate-600">
+      <div className="glass-panel flex flex-1 flex-col gap-4 rounded-3xl px-4 py-4 shadow-lg transition-colors duration-500">
+        {!userPosition ? (
+          <div className="empty-state flex h-[480px] w-full flex-col items-center justify-center gap-3 rounded-2xl text-center">
             <span className="text-2xl">🧭</span>
-            <p className="text-sm font-medium">Waiting for your location...</p>
-            <p className="text-xs text-slate-500">If it takes too long, ensure browser permissions allow location access.</p>
+            <p className="text-primary text-sm font-semibold">Waiting for a location…</p>
+            <p className="text-subtle text-xs">Allow GPS or enter a city above to unlock suggestions.</p>
           </div>
-        ) : null}
-
-        {mapCenter ? (
-          <div className="relative">
-            <MapContainer
-              center={[mapCenter.lat, mapCenter.lng]}
-              zoom={14}
-              className="h-[480px] w-full rounded-2xl"
-            >
-              <MapRecentre targetPosition={mapCenter} />
+        ) : (
+          <div className="relative" id="map-area">
+            <MapContainer center={[userPosition.lat, userPosition.lng]} zoom={14} className="h-[480px] w-full rounded-2xl">
+              <MapRecentre target={userPosition} />
               <TileLayer
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 attribution="&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors"
               />
-              {userPosition ? (
-                <Marker position={[userPosition.lat, userPosition.lng]} icon={userIcon}>
-                  <Popup>You are here.</Popup>
+              <Marker position={[userPosition.lat, userPosition.lng]} icon={userIcon}>
+                <Popup>Your current location</Popup>
+              </Marker>
+              {recommendedPlaces.map((place) => (
+                <Marker key={place.id} position={place.position} icon={placeIcon}>
+                  <Popup>
+                    <strong>{place.name}</strong>
+                    <br />
+                    {place.reason || moodReason}
+                  </Popup>
                 </Marker>
-              ) : null}
-              {!isLoadingPlaces &&
-                recommendedPlaces.map((place) => (
-                  <Marker key={place.id} position={place.position} icon={placeIcon}>
-                    <Popup>
-                      <strong>{place.name}</strong>
-                      <br />
-                      {place.reason}
-                      {Number.isFinite(place.distanceKm) ? (
-                        <>
-                          <br />
-                          Approximately {place.distanceKm} km away
-                        </>
-                      ) : null}
-                      {place.id === activePlaceId ? (
-                        <>
-                          <br />
-                          <span className="font-semibold text-emerald-600">Highlighted pick</span>
-                        </>
-                      ) : null}
-                    </Popup>
-                  </Marker>
-                ))}
+              ))}
             </MapContainer>
-            {userPosition ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setMapFocus({ lat: userPosition.lat, lng: userPosition.lng });
-                  setActivePlaceId(null);
-                }}
-                className="absolute right-4 top-4 inline-flex items-center gap-2 rounded-full bg-white/90 px-3 py-1 text-xs font-semibold text-emerald-600 shadow hover:bg-white"
-              >
-                Recenter on me
-                <span aria-hidden>⌖</span>
-              </button>
+            {isLoadingPlaces ? (
+              <div className="loading-overlay absolute inset-0 flex items-center justify-center rounded-2xl">
+                <div className="flex flex-col items-center gap-4">
+                  <div className="loading-spinner"></div>
+                  <div className="pill-tag inline-flex items-center justify-center rounded-full px-6 py-2 text-xs font-semibold uppercase tracking-[0.2em]">
+                    Discovering places…
+                  </div>
+                </div>
+              </div>
             ) : null}
           </div>
-        ) : null}
-
-        {isLoadingPlaces ? (
-          <p className="text-xs text-slate-500">Loading mood-matched places nearby...</p>
-        ) : null}
-        {placesError ? (
-          <p className="text-xs text-rose-500">{placesError}</p>
-        ) : null}
-        {locationNotice ? (
-          <p className="text-xs text-slate-500">{locationNotice}</p>
-        ) : null}
+        )}
 
         {recommendedPlaces.length > 0 ? (
-          <section className="flex flex-col gap-4 rounded-2xl border border-emerald-100 bg-white/90 p-4 shadow-inner">
-            <div className="flex flex-col gap-1 text-slate-700 sm:flex-row sm:items-center sm:justify-between">
-              <h3 className="text-base font-semibold text-slate-900">Top matches right now</h3>
-              <p className="text-xs text-slate-500">Pick a card to spotlight it on the map.</p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
+          <section className="glass-panel-strong grid gap-3 rounded-2xl p-4 shadow-inner transition-colors duration-500 sm:grid-cols-2 md:grid-cols-3">
             {recommendedPlaces.map((place, index) => (
               <article
-                key={place.id}
-                className={`flex flex-col gap-2 rounded-xl border bg-gradient-to-br from-emerald-50 via-white to-sky-50 p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md ${
-                  place.id === activePlaceId ? "border-emerald-300" : "border-emerald-50"
-                }`}
+                key={`card-${place.id}`}
+                className="glass-panel flex flex-col gap-3 rounded-xl p-4 shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-lg"
               >
-                <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-[0.2em] text-emerald-500">
-                  <span>Pick #{index + 1}</span>
-                  {Number.isFinite(place.distanceKm) ? <span>{place.distanceKm} km away</span> : null}
-                </div>
-                <h3 className="text-lg font-semibold text-slate-900">{place.name}</h3>
-                <p className="text-sm text-slate-600">{place.reason}</p>
+                <span className="pill-tag inline-flex w-fit items-center justify-center rounded-full px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.25em]">
+                  Pick #{index + 1}
+                </span>
+                <h3 className="text-primary text-lg font-semibold">{place.name}</h3>
+                <p className="text-secondary text-sm">{place.reason || moodReason}</p>
                 <button
                   type="button"
-                  className="mt-auto inline-flex w-fit items-center gap-2 rounded-full border border-emerald-200 px-4 py-1.5 text-xs font-semibold text-emerald-600 hover:bg-emerald-100"
                   onClick={() => {
-                    if (place.position?.length === 2) {
-                      setActivePlaceId(place.id);
-                      setMapFocus({ lat: place.position[0], lng: place.position[1] });
-                      if (typeof window !== "undefined") {
-                        window.scrollTo({ top: 0, behavior: "smooth" });
-                      }
+                    if (typeof window !== "undefined") {
+                      window.scrollTo({ top: 0, behavior: "smooth" });
                     }
                   }}
+                  className="btn-ghost mt-auto inline-flex w-fit items-center gap-2 rounded-full px-4 py-1.5 text-xs font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
                 >
                   View on map
                   <span aria-hidden>↗</span>
                 </button>
               </article>
             ))}
-            </div>
           </section>
         ) : null}
 
         <button
           type="button"
           onClick={() => navigate("/")}
-          className="mt-auto inline-flex items-center gap-2 self-end rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-white transition hover:bg-emerald-400"
+          className="btn-primary mt-auto inline-flex items-center gap-2 self-end rounded-full px-5 py-2 text-sm font-semibold shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-white/65 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
         >
           Choose a different mood
           <span aria-hidden>↺</span>
@@ -709,3 +463,4 @@ const Map = () => {
 };
 
 export default Map;
+
