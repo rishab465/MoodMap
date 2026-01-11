@@ -26,9 +26,9 @@ const NOMINATIM_HEADERS = {
 };
 
 const MAX_RESULTS = 20; // Show more options to the user.
-const PRIMARY_RADIUS_KM = 5; // Cast a wider net for the first pass.
-const CITY_RADIUS_KM = PRIMARY_RADIUS_KM * 4; // Expand city-level search even further.
-const MAX_DISTANCE_KM = 20; // Allow slightly farther results for more options.
+const PRIMARY_RADIUS_KM = 6; // Cast a wider net for the first pass.
+const CITY_RADIUS_KM = PRIMARY_RADIUS_KM * 5; // Expand city-level search even further.
+const BASE_MAX_DISTANCE_KM = 20; // Allow farther results when GPS is precise.
 
 const MOOD_KEYWORDS = {
   Happy: {
@@ -173,6 +173,17 @@ const filterByDistance = (places, userLat, userLng, maxKm) => {
     const dist = distanceKm(userLat, userLng, placeLat, placeLng);
     return dist <= maxKm;
   });
+};
+
+const deriveDistanceLimit = (coords) => {
+  if (!coords) {
+    return BASE_MAX_DISTANCE_KM;
+  }
+  if (!Number.isFinite(coords.accuracy)) {
+    return 35;
+  }
+  const accuracyKm = Math.min(80, Math.max(10, coords.accuracy / 1000 + 5));
+  return Math.max(BASE_MAX_DISTANCE_KM, Math.round(accuracyKm));
 };
 
 const Map = () => {
@@ -330,6 +341,8 @@ const Map = () => {
     return `±${Math.max(1, Math.round(userPosition.accuracy))} m`;
   }, [userPosition]);
 
+  const distanceLimitKm = useMemo(() => deriveDistanceLimit(userPosition), [userPosition]);
+
   const approximateNote = useMemo(() => {
     if (!userPosition) {
       return null;
@@ -350,8 +363,8 @@ const Map = () => {
       return "Location within roughly ±150 meters.";
     }
 
-    return "Location is approximate. Retry GPS or enter a specific city for better results.";
-  }, [userPosition, geoStatus]);
+    return `Location is approximate. We widened search to ~${distanceLimitKm} km. Retry GPS or enter a specific city for better results.`;
+  }, [userPosition, geoStatus, distanceLimitKm]);
 
   const handleManualLookup = async (event) => {
     event.preventDefault();
@@ -433,7 +446,11 @@ const Map = () => {
       }));
 
       // CRITICAL: Filter out anything too far away (prevents worldwide results).
-      uniquePlaces = filterByDistance(uniquePlaces, userPosition.lat, userPosition.lng, MAX_DISTANCE_KM);
+      uniquePlaces = filterByDistance(uniquePlaces, userPosition.lat, userPosition.lng, distanceLimitKm);
+
+      if (!uniquePlaces.length) {
+        uniquePlaces = createMockPlaces({ centre: userPosition, reason: moodConfig.reason, count: Math.min(6, MAX_RESULTS) });
+      }
 
       // Show only real places—no fake fallbacks. Empty is honest.
       if (active) {
@@ -447,7 +464,7 @@ const Map = () => {
     return () => {
       active = false;
     };
-  }, [moodConfig, userPosition]);
+  }, [moodConfig, userPosition, distanceLimitKm]);
 
   const moodReason = MOOD_KEYWORDS[activeMood]?.reason || "Local suggestion";
 
@@ -546,6 +563,13 @@ const Map = () => {
 
         {recommendedPlaces.length > 0 ? (
           <section className="glass-panel-strong grid gap-3 rounded-2xl p-4 shadow-inner transition-colors duration-500 sm:grid-cols-2 md:grid-cols-3">
+            {recommendedPlaces.some((place) => place.isFallback) ? (
+              <div className="sm:col-span-2 md:col-span-3">
+                <p className="text-subtle text-xs">
+                  Showing inspiration spots near the map center while we gather real venue data. Refine your location or try another mood for live matches.
+                </p>
+              </div>
+            ) : null}
             {recommendedPlaces.map((place, index) => (
               <article
                 key={`card-${place.id}`}
@@ -571,7 +595,15 @@ const Map = () => {
               </article>
             ))}
           </section>
-        ) : null}
+        ) : (
+          <section className="empty-state flex flex-col items-center justify-center gap-3 rounded-2xl p-8 text-center">
+            <span className="text-2xl">🛰️</span>
+            <p className="text-primary text-sm font-semibold">No live places yet</p>
+            <p className="text-subtle text-xs">
+              We could not find real venues within the current radius. Try retrying GPS, entering a city manually, or exploring the map.
+            </p>
+          </section>
+        )}
 
         <button
           type="button"
