@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import L from "leaflet";
@@ -198,6 +198,84 @@ const Map = () => {
   const [manualError, setManualError] = useState(null);
   const [recommendedPlaces, setRecommendedPlaces] = useState([]);
   const [isLoadingPlaces, setIsLoadingPlaces] = useState(false);
+  const [lastGpsUpdate, setLastGpsUpdate] = useState(null);
+  const watchIdRef = useRef(null);
+
+  const persistLocation = useCallback((coords) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem("moodmap:lastLocation", JSON.stringify(coords));
+    } catch (error) {
+      console.warn("Failed to persist location", error);
+    }
+  }, []);
+
+  const handlePosition = useCallback(
+    (position) => {
+      const { latitude, longitude, accuracy } = position.coords;
+      const coords = { lat: latitude, lng: longitude, accuracy: Number.isFinite(accuracy) ? accuracy : null };
+
+      setUserPosition((previous) => {
+        if (previous && previous.lat === coords.lat && previous.lng === coords.lng && previous.accuracy === coords.accuracy) {
+          return previous;
+        }
+        return coords;
+      });
+
+      setLastGpsUpdate(Date.now());
+      persistLocation(coords);
+
+      if (coords.accuracy == null) {
+        setGeoStatus("Location found. Waiting for improved accuracy…");
+        return;
+      }
+
+      if (coords.accuracy <= 50) {
+        setGeoStatus("Precise location locked (±50 m).");
+      } else if (coords.accuracy <= 150) {
+        setGeoStatus(`Approximate location (±${Math.round(coords.accuracy)} m).`);
+      } else {
+        setGeoStatus("Location is rough. Try retrying GPS or enter a city manually.");
+      }
+    },
+    [persistLocation]
+  );
+
+  const handlePositionError = useCallback((error) => {
+    switch (error.code) {
+      case error.PERMISSION_DENIED:
+        setGeoStatus("Permission denied. Enable GPS or enter a location manually.");
+        break;
+      case error.POSITION_UNAVAILABLE:
+        setGeoStatus("Location unavailable. Move to an open area or enter a city manually.");
+        break;
+      case error.TIMEOUT:
+        setGeoStatus("Location lookup timed out. Tap retry or enter a city manually.");
+        break;
+      default:
+        setGeoStatus("We could not read GPS. Enter a location manually.");
+    }
+  }, []);
+
+  const requestLocation = useCallback(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      setGeoStatus("Geolocation unavailable. Enter a city below.");
+      return;
+    }
+
+    setGeoStatus("Requesting location…");
+    navigator.geolocation.getCurrentPosition(handlePosition, handlePositionError, {
+      enableHighAccuracy: true,
+      timeout: 12000,
+      maximumAge: 0,
+    });
+  }, [handlePosition, handlePositionError]);
+
+  const handleRetryGps = useCallback(() => {
+    requestLocation();
+  }, [requestLocation]);
 
   useEffect(() => {
     if (routeMood && routeMood !== activeMood) {
@@ -206,29 +284,26 @@ const Map = () => {
   }, [routeMood, activeMood, setMood]);
 
   useEffect(() => {
+    requestLocation();
+
     if (typeof navigator === "undefined" || !navigator.geolocation) {
-      setGeoStatus("Geolocation unavailable. Enter a city below.");
-      return;
+      return undefined;
     }
 
-    setGeoStatus("Requesting location…");
+    const watchId = navigator.geolocation.watchPosition(handlePosition, handlePositionError, {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 0,
+    });
+    watchIdRef.current = watchId;
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude, accuracy } = position.coords;
-        const coords = { lat: latitude, lng: longitude, accuracy };
-        setUserPosition(coords);
-        setGeoStatus("Location locked.");
-        if (typeof window !== "undefined") {
-          window.sessionStorage.setItem("moodmap:lastLocation", JSON.stringify(coords));
-        }
-      },
-      () => {
-        setGeoStatus("We could not read GPS. Enter a location manually.");
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
-  }, []);
+    return () => {
+      if (watchIdRef.current != null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+    };
+  }, [handlePosition, handlePositionError, requestLocation]);
 
   const moodConfig = useMemo(() => {
     return {
@@ -237,11 +312,46 @@ const Map = () => {
     };
   }, [activeMood]);
 
-  const approximateNote = useMemo(() => {
-    if (!userPosition?.accuracy) return "Desktop browsers may use Wi‑Fi or IP data, so spots are approximate.";
-    if (userPosition.accuracy > 500) return "Location is approximate (browser reported low accuracy).";
-    return null;
+  const lastUpdatedLabel = useMemo(() => {
+    if (!lastGpsUpdate) {
+      return null;
+    }
+    try {
+      return new Date(lastGpsUpdate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } catch (error) {
+      return null;
+    }
+  }, [lastGpsUpdate]);
+
+  const accuracyLabel = useMemo(() => {
+    if (userPosition?.accuracy == null) {
+      return null;
+    }
+    return `±${Math.max(1, Math.round(userPosition.accuracy))} m`;
   }, [userPosition]);
+
+  const approximateNote = useMemo(() => {
+    if (!userPosition) {
+      return null;
+    }
+
+    if (userPosition.accuracy == null) {
+      if (geoStatus.startsWith("Manual")) {
+        return "Use the map controls to fine-tune this manual spot if needed.";
+      }
+      return "Browser provided an approximate location via network lookup.";
+    }
+
+    if (userPosition.accuracy <= 75) {
+      return null;
+    }
+
+    if (userPosition.accuracy <= 150) {
+      return "Location within roughly ±150 meters.";
+    }
+
+    return "Location is approximate. Retry GPS or enter a specific city for better results.";
+  }, [userPosition, geoStatus]);
 
   const handleManualLookup = async (event) => {
     event.preventDefault();
@@ -279,9 +389,8 @@ const Map = () => {
 
       const coords = { lat, lng, accuracy: null };
       setUserPosition(coords);
-      if (typeof window !== "undefined") {
-        window.sessionStorage.setItem("moodmap:lastLocation", JSON.stringify(coords));
-      }
+      setLastGpsUpdate(Date.now());
+      persistLocation(coords);
       setGeoStatus("Manual location applied.");
       setManualInput("");
     } catch (error) {
@@ -377,6 +486,21 @@ const Map = () => {
           </div>
         </form>
         {manualError ? <p className="mt-2 text-xs text-rose-400">{manualError}</p> : null}
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleRetryGps}
+            className="btn-ghost inline-flex items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black"
+          >
+            Retry GPS
+          </button>
+          {accuracyLabel ? (
+            <span className="pill-tag inline-flex items-center gap-2 rounded-full px-3 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.25em]">
+              GPS accuracy {accuracyLabel}
+            </span>
+          ) : null}
+          {lastUpdatedLabel ? <span className="text-subtle text-xs">Last updated {lastUpdatedLabel}</span> : null}
+        </div>
       </section>
 
       <div className="glass-panel flex flex-1 flex-col gap-4 rounded-3xl px-4 py-4 shadow-lg transition-colors duration-500">
