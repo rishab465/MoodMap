@@ -26,30 +26,30 @@ const NOMINATIM_HEADERS = {
 };
 
 const MAX_RESULTS = 20; // Show more options to the user.
-const PRIMARY_RADIUS_KM = 6; // Cast a wider net for the first pass.
-const CITY_RADIUS_KM = PRIMARY_RADIUS_KM * 5; // Expand city-level search even further.
-const BASE_MAX_DISTANCE_KM = 20; // Allow farther results when GPS is precise.
+const PRIMARY_RADIUS_KM = 10; // Cast a wider net for the first pass.
+const CITY_RADIUS_KM = PRIMARY_RADIUS_KM * 8; // Expand city-level search even further.
+const BASE_MAX_DISTANCE_KM = 30; // Allow farther results when GPS is precise.
 
 const MOOD_KEYWORDS = {
   Happy: {
-    keywords: ["live music", "rooftop bar", "festival", "dessert cafe"],
+    keywords: ["bar", "nightclub", "restaurant", "pub", "cafe", "brewery", "pizza"],
     reason: "Upbeat venues keep the celebration going.",
   },
   Sad: {
-    keywords: ["cozy cafe", "bookstore", "tea lounge", "soothing spa"],
+    keywords: ["cafe", "library", "bookstore", "tea", "restaurant", "quiet"],
     reason: "Warm lighting and calm playlists help reset the mood.",
   },
   Angry: {
-    keywords: ["boxing studio", "arcade bar", "escape room", "indoor climbing"],
+    keywords: ["gym", "sport", "bar", "nightclub", "arcade", "climbing"],
     reason: "High-energy experiences channel intensity in a grounded way.",
   },
   Calm: {
-    keywords: ["botanical garden", "meditation studio", "tea house", "nature walk"],
+    keywords: ["park", "garden", "spa", "yoga", "library", "cafe", "nature"],
     reason: "Soft nature-backed experiences keep things peaceful.",
   },
 };
 
-const BASE_KEYWORDS = ["restaurant", "park", "cafe", "museum", "shopping"];
+const BASE_KEYWORDS = ["restaurant", "park", "cafe", "bar", "museum", "shopping", "hotel", "pharmacy"];
 
 const MapRecentre = ({ target }) => {
   const map = useMap();
@@ -448,8 +448,19 @@ const Map = () => {
       // CRITICAL: Filter out anything too far away (prevents worldwide results).
       uniquePlaces = filterByDistance(uniquePlaces, userPosition.lat, userPosition.lng, distanceLimitKm);
 
+      // If we still have no results, try a broader fallback search with very generic amenities
       if (!uniquePlaces.length) {
-        uniquePlaces = createMockPlaces({ centre: userPosition, reason: moodConfig.reason, count: Math.min(6, MAX_RESULTS) });
+        const fallbackKeywords = ["amenity", "place", "shop"];
+        
+        for (const fallbackTerm of fallbackKeywords) {
+          if (!active || uniquePlaces.length > 0) break;
+          
+          const fallbackUrl = buildSearchUrl({ term: fallbackTerm, centre: userPosition, radiusKm: CITY_RADIUS_KM * 2, bounded: false });
+          const fallbackResults = await fetchAndNormalize({ url: fallbackUrl, reason: "Nearby location", fallbackTerm });
+          uniquePlaces.push(...fallbackResults);
+          
+          uniquePlaces = filterByDistance(uniquePlaces, userPosition.lat, userPosition.lng, distanceLimitKm * 2);
+        }
       }
 
       // Show only real places—no fake fallbacks. Empty is honest.
