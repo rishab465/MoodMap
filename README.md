@@ -36,5 +36,6 @@ MoodMap is intentionally frontend-driven: all data comes directly from the userâ
 - Store recent adventures so users can build a mood history.
 - Package the experience as a PWA for quick mobile access.
 
+
 ## Live Demo
-Live Demo : mood-map-zeta.vercel.app
+https://mood-map-zeta.vercel.app
