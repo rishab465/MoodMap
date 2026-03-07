@@ -36,12 +36,5 @@ MoodMap is intentionally frontend-driven: all data comes directly from the user�
 - Store recent adventures so users can build a mood history.
 - Package the experience as a PWA for quick mobile access.
 
-## Getting Started
-```bash
-npm install
-npm run dev    # start local development server
-npm run build  # create a production build
-```
-
-## Resume Snapshot
-“Led MoodMap, a React + Leaflet frontend that maps mood-based recommendations using OpenStreetMap APIs. Built resilient geolocation flows, fallback suggestions, and a polished UX ready for future backend expansion.”
+## Live Demo
+[Open App](mood-map-zeta.vercel.app)
